@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import counter_pb2
 import counter_pb2_grpc
 from client import CounterClient
+from replicated import ReplicatedClient
 from server import CounterServicer
 
 
@@ -103,3 +104,61 @@ def test_retry_after_timeout_is_safe(make_server):
 
     time.sleep(1.5)  # бірінші (timeout болған) сұраныс аяқталып үлгерсін
     assert client.get("x").value == 1  # екі рет емес, бір-ақ рет артты
+
+@pytest.fixture
+def make_replicas():
+    servers = []
+    servicers = []
+
+    def _make(n=3):
+        addrs = []
+        for i in range(n):
+            servicer = CounterServicer(name=f"replica-{i}")
+            server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+            counter_pb2_grpc.add_CounterServicer_to_server(servicer, server)
+            port = server.add_insecure_port("localhost:0")
+            server.start()
+            servers.append(server)
+            servicers.append(servicer)
+            addrs.append(f"localhost:{port}")
+        return addrs, servers, servicers
+
+    yield _make
+    for s in servers:
+        s.stop(0)
+
+
+def test_majority_commit_two_acks(make_replicas):
+    addrs, servers, _ = make_replicas()
+    servers[1].stop(0)  # бір replica өшті
+    rc = ReplicatedClient(addrs, timeout=0.5)
+
+    r = rc.incr("x", 1)
+
+    assert r.committed is True
+    assert r.acks == 2
+
+
+
+def test_no_commit_below_majority(make_replicas):
+    addrs, servers, servicers = make_replicas()
+    servers[1].stop(0)
+    servers[2].stop(0)  # екі replica өшті
+    rc = ReplicatedClient(addrs, timeout=0.5)
+
+    r = rc.incr("x", 1)
+
+    assert r.committed is False  # клиентке "commit" деп көрсетілмейді
+    assert r.acks == 1
+    # Аномалия: тірі replica жазуды қолданып қойған, бірақ ол commit емес
+    assert servicers[0]._values.get("x") == 1
+
+
+def test_replicas_converge(make_replicas):
+    addrs, _, servicers = make_replicas()
+    rc = ReplicatedClient(addrs, timeout=2.0)
+
+    for _ in range(20):
+        assert rc.incr("x", 1).committed
+
+    assert [s._values for s in servicers] == [{"x": 20}] * 3
