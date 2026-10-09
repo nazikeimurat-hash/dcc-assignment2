@@ -1,5 +1,8 @@
 import threading
 
+LOG_FILE = None          # сценарий осыны орнатады, мысалы "logs/b2_trace.log"
+_file_lock = threading.Lock()
+
 
 class LamportClock:
     """Lamport логикалық сағаты. Thread-safe."""
@@ -22,4 +25,10 @@ class LamportClock:
             return self._time
 
     def log(self, message):
-        print(f"[{self.name}] {message}", flush=True)
+        line = f"[{self.name}] {message}"
+        print(line, flush=True)
+        if LOG_FILE:
+            with _file_lock:
+                with open(LOG_FILE, "a", encoding="utf-8") as f:
+
+                    f.write(line + "\n")
